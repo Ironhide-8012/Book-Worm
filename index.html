@@ -217,7 +217,16 @@ html[data-ui="linen"] .cv:after{background:linear-gradient(90deg,rgba(0,0,0,.22)
 #scroller{position:absolute;inset:0;overflow:hidden}
 #scroller.vs{overflow-y:auto;-webkit-overflow-scrolling:touch}
 #page{will-change:transform}
-#content{outline:none}
+/* A tap on the page must stay a page turn. While the text is selectable the
+   browser answers a tap by selecting a word and offering to search the web for
+   it, which throws the reader out of the book — so selection is off until a
+   deliberate long press turns it on (#content.sel). */
+#content{outline:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+@media (pointer:coarse){
+  #content{-webkit-user-select:none;user-select:none}
+  #content.sel{-webkit-user-select:text;user-select:text}
+}
+#content ::selection{background:rgba(120,160,255,.35)}
 #content img{max-width:100%;height:auto;display:block;margin:12px auto;border-radius:4px}
 #content h1,#content h2,#content h3{line-height:1.3;margin:1.1em 0 .55em;font-weight:700}
 #content h1{font-size:1.5em}#content h2{font-size:1.3em}#content h3{font-size:1.12em}
@@ -1662,6 +1671,7 @@ function renderChapter(idx, ratio, focusText, seat){
   return P.chapterHTML(S.book, idx).then(function(html){
     if(!S.book || S.book.id!==reqBook || S.ch!==reqCh) return;
     var box = P.sanitizeInto(html || "<p><em>Empty section.</em></p>");
+    R.content.classList.remove("sel");
     R.content.innerHTML = "";
     while(box.firstChild) R.content.appendChild(box.firstChild);
     S.blocks = null;
@@ -1840,6 +1850,7 @@ function curRatio(){
 }
 function turn(dir){
   if(S.tapT){ clearTimeout(S.tapT); S.tapT=null; }
+  clearSelection();
   endSeat();
   if(P.set.mode==="scroll"){
     var d = R.scroller.clientHeight * 0.88 * dir;
@@ -2423,26 +2434,41 @@ function wire(){
         "#topbar,#botbar,.selbar,#hud,#miniTts,#pgnum,.sheet,button,a,input,select,textarea,label,mark"));
     }catch(e){ return false; }
   }
+  var holdT = null, held = false;
+  function cancelHold(){ if(holdT){ clearTimeout(holdT); holdT=null; } }
   R.stage.addEventListener("touchstart", function(e){
-    if(e.touches.length!==1) return;
-    if(fromControl(e.target)){ dragging=false; return; }
-    sx=e.touches[0].clientX; sy=e.touches[0].clientY; st=P.now(); moved=false; dragging=true;
+    if(e.touches.length!==1){ cancelHold(); return; }
+    if(fromControl(e.target)){ dragging=false; cancelHold(); return; }
+    sx=e.touches[0].clientX; sy=e.touches[0].clientY; st=P.now(); moved=false; dragging=true; held=false;
+    cancelHold();
+    var hx=sx, hy=sy;
+    holdT = setTimeout(function(){
+      holdT = null;
+      if(!dragging || moved) return;
+      held = beginSelection(hx, hy);
+    }, 480);
   }, {passive:true});
   R.stage.addEventListener("touchmove", function(e){
     if(!dragging) return;
     var dx=e.touches[0].clientX-sx, dy=e.touches[0].clientY-sy;
-    if(Math.abs(dx)>12||Math.abs(dy)>12) moved=true;
+    if(Math.abs(dx)>12||Math.abs(dy)>12){ moved=true; cancelHold(); }
   }, {passive:true});
   R.stage.addEventListener("touchend", function(e){
+    cancelHold();
     if(!dragging) return; dragging=false;
     if(fromControl(e.target)) return;
+    if(held){ held=false; return; }            /* the long press became a selection */
     var t = e.changedTouches[0];
     var dx = t.clientX-sx, dy = t.clientY-sy, dt = P.now()-st;
+    /* Consume the tap ourselves. Without this the browser follows it up with its
+       own tap-on-word handling: a selected word and a "search the web" bar. */
+    if(!moved && dt<420 && e.cancelable) e.preventDefault();
     if(moved && Math.abs(dx)>44 && Math.abs(dx)>Math.abs(dy)*1.4 && P.set.mode!=="scroll"){
       turn(dx<0? 1 : -1); return;
     }
     if(!moved && dt<420) tap(t.clientX, t.clientY);
-  }, {passive:true});
+  }, {passive:false});
+  R.stage.addEventListener("touchcancel", function(){ cancelHold(); dragging=false; }, {passive:true});
   R.stage.addEventListener("click", function(e){
     if("ontouchstart" in W) return;
     if(fromControl(e.target)) return;
@@ -2499,8 +2525,52 @@ function wire(){
   $("#scrim").onclick = function(){ P.closeAllSheets(); };
 }
 
+/* the word under the finger, so a long press can select it without the browser's
+   own tap-to-select ever being involved */
+function wordRangeAt(x, y){
+  var r = null;
+  try{
+    if(D.caretRangeFromPoint) r = D.caretRangeFromPoint(x, y);
+    else if(D.caretPositionFromPoint){
+      var cp = D.caretPositionFromPoint(x, y);
+      if(cp && cp.offsetNode){ r = D.createRange(); r.setStart(cp.offsetNode, cp.offset); r.collapse(true); }
+    }
+  }catch(e){ return null; }
+  if(!r) return null;
+  var node = r.startContainer;
+  if(!node || node.nodeType!==3 || !R.content.contains(node)) return null;
+  var t = node.nodeValue || "", i = Math.min(r.startOffset, t.length);
+  var brk = /[\s\u00a0।॥,.;:!?"'“”‘’()\[\]{}—–\-…]/;
+  var a = i, b = i;
+  while(a>0 && !brk.test(t.charAt(a-1))) a--;
+  while(b<t.length && !brk.test(t.charAt(b))) b++;
+  if(b<=a) return null;
+  var out = D.createRange();
+  out.setStart(node, a); out.setEnd(node, b);
+  return out;
+}
+function beginSelection(x, y){
+  var rg = wordRangeAt(x, y);
+  if(!rg) return false;
+  R.content.classList.add("sel");       /* selectable only from here on */
+  var sel = D.getSelection();
+  try{ sel.removeAllRanges(); sel.addRange(rg); }catch(e){ return false; }
+  P.vibe(14);
+  onSelection();
+  return true;
+}
+function clearSelection(){
+  try{
+    var sel = D.getSelection();
+    if(sel && !sel.isCollapsed) sel.removeAllRanges();
+  }catch(e){}
+  if(R.content) R.content.classList.remove("sel");
+  hideSelBar();
+}
+P.clearSelection = clearSelection;
+
 function tap(x,y){
-  if(D.getSelection && String(D.getSelection()).trim()){ return; }
+  if(D.getSelection && String(D.getSelection()).trim()){ clearSelection(); return; }
   hideSelBar();
   var w = R.stage.clientWidth;
   var zone = P.set.tapZones===false? 0 : 0.32;
@@ -2611,11 +2681,11 @@ function onSelection(){
     bar.appendChild(b);
   });
   var cp = el("button", null, "Copy");
-  cp.onclick = function(){ copyText(String(sel)); hideSelBar(); };
+  cp.onclick = function(){ copyText(String(sel)); clearSelection(); };
   var nt = el("button", null, "Note");
   nt.onclick = function(){ addHighlight("#ffe27a", true); };
   var sr = el("button", null, "Find");
-  sr.onclick = function(){ var t=String(sel).trim().slice(0,60); hideSelBar(); P.sheetSearch(t); };
+  sr.onclick = function(){ var t=String(sel).trim().slice(0,60); clearSelection(); P.sheetSearch(t); };
   bar.appendChild(cp); bar.appendChild(nt); bar.appendChild(sr);
   bar.classList.add("on");
   var top = rect.top - stg.top - 52;
@@ -2652,6 +2722,7 @@ function addHighlight(color, withNote){
   S.marks.push(m);
   P.saveMarks();
   sel.removeAllRanges();
+  R.content.classList.remove("sel");
   hideSelBar();
   P.vibe(12);
   refreshMarks();
