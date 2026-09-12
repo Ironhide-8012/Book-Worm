@@ -285,6 +285,10 @@ html[data-ui="linen"] .cv:after{background:linear-gradient(90deg,rgba(0,0,0,.22)
 .row .lb{flex:1;font-size:14px}
 .row .sub{font-size:11.5px;color:var(--dim2);margin-top:2px}
 .seg{display:flex;gap:6px;flex-wrap:wrap}
+.drop{width:100%;appearance:none;-webkit-appearance:none;border:1px solid var(--line);border-radius:11px;
+  background:var(--surf2);color:var(--ink);font:inherit;font-size:14px;padding:11px 34px 11px 12px;
+  background-image:linear-gradient(45deg,transparent 50%,currentColor 50%),linear-gradient(135deg,currentColor 50%,transparent 50%);
+  background-position:calc(100% - 17px) 50%,calc(100% - 12px) 50%;background-size:5px 5px,5px 5px;background-repeat:no-repeat}
 .seg button{padding:7px 12px;border-radius:10px;background:var(--surf2);border:1px solid var(--line);font-size:12.5px;color:var(--dim)}
 .seg button.on{background:var(--acc);color:var(--acc-ink);border-color:transparent;font-weight:600}
 .stepper{display:flex;align-items:center;gap:4px}
@@ -1471,6 +1475,21 @@ var FONTS = {
   custom:'BookwormsCustom,-apple-system,"Noto Sans Bengali","Noto Sans Arabic",sans-serif'
 };
 P.FONTS = FONTS;
+/* an uploaded font gets its own family name, so several can live side by side */
+function fontFamilyOf(id){ return id==="custom" ? "BookwormsCustom" : "BWF"+String(id).replace(/[^a-zA-Z0-9]/g,""); }
+P.fontFamilyOf = fontFamilyOf;
+P.uploadedFonts = function(){ return (P.gset.fonts||[]).slice(); };
+P.fontStack = function(key){
+  if(FONTS[key]) return FONTS[key];
+  var up = P.uploadedFonts().filter(function(f){ return f.id===key; })[0];
+  if(up) return '"'+fontFamilyOf(up.id)+'",'+FONTS.system;
+  return FONTS.system;
+};
+P.fontLabel = function(key){
+  var names = {serif:"Serif", sans:"Sans", system:"বাংলা", mono:"Mono", custom:"Uploaded font"};
+  var up = P.uploadedFonts().filter(function(f){ return f.id===key; })[0];
+  return (up && up.name) || names[key] || key;
+};
 
 P.defaults = {
   theme:"bookworm", font:"serif", size:19, lineH:1.62, margin:6, justify:true,
@@ -1555,11 +1574,17 @@ P.applyTheme = function(){
 };
 P.applyType = function(relayout){
   var c = R.content; if(!c) return;
-  c.style.fontFamily = FONTS[P.set.font] || FONTS.system;
+  c.style.fontFamily = P.fontStack(P.set.font);
   c.style.fontSize = (P.set.size||19)+"px";
   c.style.lineHeight = String(P.set.lineH||1.6);
   c.style.textAlign = P.set.justify? "justify" : "start";
   c.style.hyphens = P.set.justify? "auto" : "manual";
+  /* these were only ever set from the Typography sheet, so they came back
+     unapplied after a restart */
+  c.style.setProperty("--pgap", (P.set.pgap==null?0.85:P.set.pgap)+"em");
+  c.style.textIndent = (P.set.indent||0)+"em";
+  c.style.fontWeight = String(P.set.weight||400);
+  c.style.wordSpacing = (P.set.wordSpace||0)+"em";
   if(relayout!==false){
     layout(true);
     /* Measure again once the browser has actually reflowed the columns.
@@ -3957,6 +3982,20 @@ function toggleRow(bd, label, sub, on, fn){
   bd.appendChild(r);
   return r;
 }
+function selectRow(bd, label, opts, cur, fn){
+  var r = el("div"); r.style.cssText="padding:11px 0;border-bottom:1px solid var(--line)";
+  r.appendChild(el("div",null,label)).style.cssText="font-size:13.5px;margin-bottom:9px";
+  var sel = el("select","drop");
+  opts.forEach(function(o){
+    var op = D.createElement("option");
+    op.value = o[0]; op.textContent = o[1];
+    if(o[0]===cur) op.selected = true;
+    sel.appendChild(op);
+  });
+  sel.onchange = function(){ fn(sel.value); };
+  r.appendChild(sel); bd.appendChild(r);
+  return {row:r, select:sel};
+}
 function segRow(bd, label, opts, cur, fn){
   var r = el("div"); r.style.cssText="padding:11px 0;border-bottom:1px solid var(--line)";
   r.appendChild(el("div",null,label)).style.cssText="font-size:13.5px;margin-bottom:9px";
@@ -3975,16 +4014,37 @@ function segRow(bd, label, opts, cur, fn){
 
 P.sheetType = function(){
   var sh = P.sheet({ title:"Typography", build:function(bd){
-    segRow(bd,"Font",[["serif","Serif"],["sans","Sans"],["system","বাংলা"],["mono","Mono"],["custom","Uploaded"]],
-      P.set.font, function(v){ P.setVal("font",v); });
-    var up = el("button","btn","Upload a font (.ttf/.otf)"); up.style.cssText="width:100%;margin:10px 0";
-    up.onclick = pickFont; bd.appendChild(up);
+    var fontOpts = [["serif","Serif"],["sans","Sans"],["system","বাংলা"],["mono","Mono"]];
+    P.uploadedFonts().forEach(function(f){ fontOpts.push([f.id, f.name||"Uploaded font"]); });
+    var known = fontOpts.some(function(o){ return o[0]===P.set.font; });
+    var fr = selectRow(bd,"Font", fontOpts, known? P.set.font : "serif", function(v){
+      P.setVal("font",v); refreshFontRow();
+    });
+    var acts = el("div"); acts.style.cssText="display:flex;gap:8px;margin:10px 0";
+    var up = el("button","btn","Upload a font"); up.style.cssText="flex:1";
+    up.onclick = function(){ pickFont(function(){ P.closeSheet(sh); P.sheetType(); }); };
+    var rm = el("button","btn","Remove");
+    rm.onclick = function(){
+      removeFont(P.set.font);
+      P.closeSheet(sh); P.sheetType();
+    };
+    acts.appendChild(up); acts.appendChild(rm); bd.appendChild(acts);
+    function refreshFontRow(){
+      var isUp = P.uploadedFonts().some(function(f){ return f.id===P.set.font; });
+      rm.style.display = isUp? "" : "none";
+    }
+    refreshFontRow();
     sliderRow(bd,"Text size",P.set.size,13,40,1,function(v){ P.setVal("size",v); },function(v){return v+" px";});
     sliderRow(bd,"Line height",P.set.lineH,1.1,2.4,0.02,function(v){ P.setVal("lineH",v); },function(v){return v.toFixed(2);});
     sliderRow(bd,"Side margin",P.set.margin,0,22,1,function(v){ P.setVal("margin",v); },function(v){return v+"%";});
     sliderRow(bd,"Paragraph spacing",P.set.pgap==null?0.85:P.set.pgap,0,2.2,0.05,function(v){
       P.setVal("pgap",v,true);
       if(P.R.content) P.R.content.style.setProperty("--pgap", v+"em");
+    },function(v){return v.toFixed(2)+"em";});
+    sliderRow(bd,"Word spacing",P.set.wordSpace||0,-0.05,0.6,0.01,function(v){
+      P.setVal("wordSpace",v,true);
+      if(P.R.content) P.R.content.style.wordSpacing = v+"em";
+      P.relayout(true);
     },function(v){return v.toFixed(2)+"em";});
     sliderRow(bd,"First-line indent",P.set.indent||0,0,4,0.1,function(v){
       P.setVal("indent",v,true);
@@ -4010,7 +4070,7 @@ P.sheetType = function(){
     }
   }});
 };
-function pickFont(){
+function pickFont(done){
   var fp = D.getElementById("fontPick");
   fp.onchange = function(){
     var f = fp.files && fp.files[0]; fp.value="";
@@ -4018,19 +4078,51 @@ function pickFont(){
     var r = new FileReader();
     r.onload = function(){
       var data = String(r.result);
-      P.Store.setStr("customFont", data);
-      loadCustomFont(data).then(function(){ P.setVal("font","custom"); P.toast("Font loaded"); });
+      var name = (f.name||"Font").replace(/\.[a-z0-9]+$/i,"").replace(/[_-]+/g," ").slice(0,40);
+      var id = P.uid();
+      P.gset.fonts = P.uploadedFonts().concat([{id:id, name:name}]);
+      P.saveSet();
+      P.Store.setStr("font:"+id, data);
+      loadFontData(P.fontFamilyOf(id), data).then(function(){
+        P.setVal("font", id);
+        P.toast(name+" added");
+        if(done) done();
+      });
     };
     r.readAsDataURL(f);
   };
   fp.click();
 }
-function loadCustomFont(dataURL){
+function removeFont(id){
+  var list = P.uploadedFonts(), keep = list.filter(function(f){ return f.id!==id; });
+  if(keep.length===list.length) return;
+  P.gset.fonts = keep; P.saveSet();
+  P.Store.del(id==="custom"? "customFont" : "font:"+id);
+  if(P.set.font===id) P.setVal("font","serif");
+  else { mergeSet(); P.applyType(true); }
+  P.toast("Font removed");
+}
+function loadFontData(family, dataURL){
   try{
-    if(!W.FontFace) return Promise.resolve();
-    var ff = new FontFace("BookwormsCustom", "url("+dataURL+")");
+    if(!W.FontFace || !dataURL) return Promise.resolve();
+    var ff = new FontFace(family, "url("+dataURL+")");
     return ff.load().then(function(f){ D.fonts.add(f); }).catch(function(){});
   }catch(e){ return Promise.resolve(); }
+}
+/* every uploaded font is registered at startup, so the dropdown works offline
+   and the chosen one is there before the first page is measured */
+function loadUploadedFonts(){
+  return P.Store.getStr("customFont").then(function(legacy){
+    if(legacy && !P.uploadedFonts().some(function(f){ return f.id==="custom"; })){
+      P.gset.fonts = [{id:"custom", name:"Uploaded font"}].concat(P.uploadedFonts());
+      P.saveSet();
+    }
+    var jobs = P.uploadedFonts().map(function(f){
+      if(f.id==="custom") return loadFontData("BookwormsCustom", legacy);
+      return P.Store.getStr("font:"+f.id).then(function(d){ return loadFontData(P.fontFamilyOf(f.id), d); });
+    });
+    return Promise.all(jobs);
+  }).catch(function(){});
 }
 
 P.sheetTheme = function(){
@@ -4606,7 +4698,7 @@ function boot(){
     mergeSet();
     P.applyUI();
     autoNight();
-    return P.Store.getStr("customFont").then(function(f){ if(f) return loadCustomFont(f); }).catch(function(){});
+    return loadUploadedFonts();
   }).then(function(){
     return loadCovers();
   }).then(function(){
