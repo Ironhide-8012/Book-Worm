@@ -802,7 +802,139 @@ async function wipeAll() {
   }
 }
 
-window.BookwormsCloud = Object.freeze({mount, syncNow, ensureBookAvailable, removeBook, wipeAll, disconnect});
+/* ============ importing books the reader already keeps in Drive ============
+   This is a different permission from the hidden app-data folder the library
+   syncs into: Google's picker hands back only the files the reader taps, and
+   the app can read nothing else in the Drive. */
+const PICK_SCOPE = "https://www.googleapis.com/auth/drive.file";
+const BOOK_MIME = [
+  "application/epub+zip", "application/x-fictionbook+xml", "application/zip",
+  "application/x-cbz", "text/plain", "text/html"
+].join(",");
+const pickState = {token: "", expiresAt: 0, client: null, apiPromise: null};
+
+function loadPickerApi() {
+  if (window.google?.picker) return Promise.resolve();
+  if (!pickState.apiPromise) {
+    pickState.apiPromise = new Promise((resolve, reject) => {
+      let script = document.getElementById("bookworms-gapi");
+      const start = () => {
+        if (!window.gapi?.load) { reject(new Error("Google's picker did not load")); return; }
+        window.gapi.load("picker", {
+          callback: () => window.google?.picker ? resolve() : reject(new Error("Google's picker did not load")),
+          onerror: () => reject(new Error("Google's picker did not load"))
+        });
+      };
+      if (!script) {
+        script = document.createElement("script");
+        script.id = "bookworms-gapi";
+        script.src = "https://apis.google.com/js/api.js";
+        script.async = true;
+        document.head.appendChild(script);
+      }
+      script.addEventListener("load", start, {once: true});
+      script.addEventListener("error", () => reject(new Error("Could not reach Google")), {once: true});
+      if (window.gapi?.load) start();
+    }).catch(error => { pickState.apiPromise = null; throw error; });
+  }
+  return pickState.apiPromise;
+}
+
+async function pickToken() {
+  if (pickState.token && Date.now() < pickState.expiresAt) return pickState.token;
+  await loadGoogleIdentity();
+  if (!pickState.client) {
+    pickState.client = window.google.accounts.oauth2.initTokenClient({
+      client_id: config().googleClientId,
+      scope: PICK_SCOPE,
+      callback: () => {}
+    });
+  }
+  const token = await new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = fn => value => { if (!settled) { settled = true; fn(value); } };
+    pickState.client.callback = finish(response => {
+      if (response?.error) reject(new Error(response.error_description || response.error));
+      else resolve(response);
+    });
+    pickState.client.error_callback = finish(error => reject(new Error(error?.message || error?.type || "Google sign-in was closed")));
+    pickState.client.requestAccessToken({prompt: ""});
+  });
+  if (!window.google.accounts.oauth2.hasGrantedAllScopes(token, PICK_SCOPE)) {
+    throw new Error("Permission to open your Drive files was not granted");
+  }
+  pickState.token = token.access_token;
+  pickState.expiresAt = Date.now() + Math.max(60, Number(token.expires_in) || 3600) * 1000 - 60000;
+  return pickState.token;
+}
+
+/* the project number is the part of the client ID before the dash */
+function appId() {
+  return String(config().googleAppId || config().googleClientId || "").split("-")[0];
+}
+
+async function downloadPicked(doc, token, onProgress) {
+  const response = await fetch(
+    `${DRIVE_API}/files/${encodeURIComponent(doc.id)}?alt=media&supportsAllDrives=true`,
+    {headers: {Authorization: `Bearer ${token}`}}
+  );
+  if (!response.ok) throw new Error(`${doc.name || "File"} could not be downloaded (${response.status})`);
+  const blob = await response.blob();
+  onProgress?.();
+  return new File([blob], doc.name || "book.epub", {type: blob.type || "application/octet-stream"});
+}
+
+async function pickFromDrive() {
+  const cfg = config();
+  if (!cfg.enabled || !cfg.googleClientId) throw new Error("Google Drive is not set up in this build");
+  if (!cfg.googleApiKey) throw new Error("Add googleApiKey to cloud-config.js to import from Drive");
+  if (!navigator.onLine) throw new Error("You are offline — Drive import needs a connection");
+  const app = window.BookwormsApp;
+  const toast = message => app?.toast?.(message);
+
+  toast("Opening your Drive…");
+  const [token] = await Promise.all([pickToken(), loadPickerApi()]);
+
+  const docs = await new Promise((resolve, reject) => {
+    try {
+      const view = new window.google.picker.DocsView(window.google.picker.ViewId.DOCS)
+        .setIncludeFolders(true)
+        .setSelectFolderEnabled(false)
+        .setMimeTypes(BOOK_MIME);
+      const picker = new window.google.picker.PickerBuilder()
+        .setOAuthToken(token)
+        .setDeveloperKey(cfg.googleApiKey)
+        .setAppId(appId())
+        .setTitle("Choose books")
+        .enableFeature(window.google.picker.Feature.MULTISELECT_ENABLED)
+        .addView(view)
+        .addView(new window.google.picker.DocsView(window.google.picker.ViewId.DOCS)
+          .setIncludeFolders(true).setOwnedByMe(true).setMimeTypes(BOOK_MIME).setLabel("My Drive"))
+        .setCallback(data => {
+          const action = data[window.google.picker.Response.ACTION];
+          if (action === window.google.picker.Action.PICKED) resolve(data[window.google.picker.Response.DOCUMENTS] || []);
+          else if (action === window.google.picker.Action.CANCEL) resolve([]);
+        })
+        .build();
+      picker.setVisible(true);
+    } catch (error) { reject(error); }
+  });
+
+  if (!docs.length) return 0;
+  const files = [];
+  const failed = [];
+  let done = 0;
+  for (const doc of docs) {
+    toast(`Downloading ${done + 1}/${docs.length} — ${doc.name || "book"}`);
+    try { files.push(await downloadPicked(doc, token, () => { done++; })); }
+    catch (error) { failed.push(doc.name || doc.id); }
+  }
+  if (failed.length) toast(`${failed.length} file(s) could not be downloaded`);
+  if (files.length) await app?.importFiles?.(files);
+  return files.length;
+}
+
+window.BookwormsCloud = Object.freeze({mount, syncNow, ensureBookAvailable, removeBook, wipeAll, disconnect, pickFromDrive});
 
 if (window.BookwormsApp?.ready) mount(window.BookwormsApp);
 else document.addEventListener("bookworms:ready", event => mount(event.detail || window.BookwormsApp), {once: true});

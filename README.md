@@ -68,3 +68,18 @@ In this browser's storage for this address, plus your own Drive if you connect i
 ## Updating
 
 Upload a new `index.html` and reload once. The service worker fetches the page from the network when there's a connection and keeps the cached copy only as the offline fallback.
+
+## Adding books
+
+The **Add books** sheet offers three ways in:
+
+- **Choose files** — pick one or more books from the device.
+- **Scan a folder** — pick a folder and every book inside it, subfolders
+  included, is offered for import. Books already on the shelf and duplicate
+  copies inside the folder are counted and skipped. Folder picking needs
+  Chrome for Android 132+, iOS 18.4+ or a current desktop browser; elsewhere it
+  falls back to picking files.
+- **Import from Google Drive** — pick books from Drive through Google's own
+  picker. Set `googleApiKey` in `cloud-config.js` to switch this on; the picker
+  uses the non-sensitive `drive.file` scope, so the app can read only the files
+  tapped in the picker.

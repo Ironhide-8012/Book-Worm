@@ -373,6 +373,7 @@ html[data-ui="linen"] .cv:after{background:linear-gradient(90deg,rgba(0,0,0,.22)
 <div id="scrim"></div>
 <div id="toast"></div>
 <input type="file" id="filePick" multiple accept=".epub,.txt,.fb2,.cbz,.html,.htm,.zip,application/epub+zip" style="position:fixed;left:-9999px">
+<input type="file" id="folderPick" multiple webkitdirectory directory style="position:fixed;left:-9999px">
 <input type="file" id="fontPick" accept=".ttf,.otf,.woff,.woff2" style="position:fixed;left:-9999px">
 <input type="file" id="imgPick" accept="image/*" style="position:fixed;left:-9999px">
 <input type="file" id="jsonPick" accept=".json,application/json" style="position:fixed;left:-9999px">
@@ -3160,7 +3161,7 @@ function buildLibrary(){
   L.root = r;
   L.inner = D.getElementById("libInner");
   D.getElementById("libLogo").innerHTML = P.logoSVG(32);
-  D.getElementById("lAdd").onclick = function(){ P.vibe(); D.getElementById("filePick").click(); };
+  D.getElementById("lAdd").onclick = function(){ P.vibe(); P.sheetAdd(); };
   D.getElementById("lAdd2").onclick = function(){ D.getElementById("lAdd").click(); };
   D.getElementById("lMore").onclick = openMore;
   /* cloud-sync.js shows or hides Disconnect as the connection changes;
@@ -3380,7 +3381,7 @@ function renderLibrary(){
     e.innerHTML = '<div style="opacity:.5">'+P.logoSVG(72)+'</div><b>Your shelf is empty</b>'+
       '<div style="font-size:13px">Add EPUB, TXT, FB2, CBZ or HTML files from this device.</div>';
     var add = el("button","btn pri","Add books"); add.style.marginTop="18px";
-    add.onclick = function(){ D.getElementById("filePick").click(); };
+    add.onclick = function(){ P.sheetAdd(); };
     e.appendChild(add);
     host.appendChild(e);
     return;
@@ -3528,6 +3529,9 @@ window.BookwormsApp = {
       };
     });
   },
+  /* used by the Drive picker: books chosen there land through the normal import */
+  importFiles:function(files){ return P.importFiles(files); },
+  toast:function(msg){ P.toast(msg, 2600); },
   getCloudMeta:function(){ return P.Store.getJSON(CLOUD_META, null); },
   setCloudMeta:function(v){ return P.Store.setJSON(CLOUD_META, v); },
   getBookBytes:function(id){ return P.Store.getBlob("book:"+id); },
@@ -3637,6 +3641,83 @@ function rowBtn(b, label, sub, fn){
   b.appendChild(r);
   return r;
 }
+/* ---------------- adding books ---------------- */
+var BOOK_EXT = /\.(epub|txt|fb2|cbz|zip|html?)$/i;
+P.sheetAdd = function(){
+  var sh = P.sheet({ title:"Add books", build:function(bd){
+    rowBtn(bd, "Choose files", "Pick one or more books from this device", function(){
+      P.closeSheet(sh); D.getElementById("filePick").click();
+    });
+    rowBtn(bd, "Scan a folder", "Every book inside it, subfolders included", function(){
+      P.closeSheet(sh);
+      var inp = D.getElementById("folderPick");
+      if(!("webkitdirectory" in inp)){
+        P.toast("This browser can't open a whole folder — use Choose files", 3400);
+        D.getElementById("filePick").click();
+        return;
+      }
+      inp.click();
+    });
+    var drive = rowBtn(bd, "Import from Google Drive", "Pick books from your Drive", function(){
+      P.closeSheet(sh);
+      if(W.BookwormsCloud && W.BookwormsCloud.pickFromDrive){
+        W.BookwormsCloud.pickFromDrive().catch(function(e){
+          P.toast(e && e.message ? e.message : "Drive import failed", 3600);
+        });
+      } else P.toast("Google Drive is not set up in this build", 3000);
+    });
+    var cfg = W.BOOKWORMS_CLOUD_CONFIG || {};
+    if(!cfg.enabled || !cfg.googleClientId || !cfg.googleApiKey){
+      drive.style.opacity = ".55";
+      drive.querySelector(".sub").textContent = !cfg.googleApiKey && cfg.googleClientId
+        ? "Add googleApiKey to cloud-config.js to switch this on"
+        : "Set up Google Drive in Settings first";
+      drive.onclick = function(){ P.toast(drive.querySelector(".sub").textContent, 4000); };
+    }
+  }});
+  return sh;
+};
+
+/* a folder can hold anything; keep the books, drop what is already on the shelf */
+P.importFolder = function(files){
+  var all = Array.prototype.slice.call(files||[]);
+  if(!all.length) return Promise.resolve();
+  var books = all.filter(function(f){ return BOOK_EXT.test(f.name||"") && f.size>0; });
+  var seen = {}, fresh = [], dup = 0, copies = 0;
+  books.forEach(function(f){
+    var k = (f.name||"")+":"+f.size;
+    if(seen[k]){ copies++; return; }   /* the same book twice inside the folder */
+    seen[k] = 1;
+    var here = P.books.some(function(b){ return b.file===f.name && Math.abs((b.size||0)-f.size)<32; });
+    if(here) dup++; else fresh.push(f);
+  });
+  if(!books.length){ P.toast("No books found in that folder", 3000); return Promise.resolve(); }
+  if(!fresh.length){ P.toast(books.length+" found · all already on your shelf", 3400); return Promise.resolve(); }
+  if(fresh.length>150) P.toast("Large folder — this will take a few minutes", 3000);
+  var sh = P.sheet({ title:"Found "+fresh.length+(fresh.length===1?" book":" books"), build:function(bd){
+    var lines = [ fresh.length+" new "+(fresh.length===1?"book":"books")+" to import" ];
+    if(dup) lines.push(dup+" already on your shelf");
+    if(copies) lines.push(copies+" duplicate "+(copies===1?"copy":"copies")+" in the folder");
+    if(all.length-books.length) lines.push((all.length-books.length)+" other "+(all.length-books.length===1?"file":"files")+" skipped");
+    var info = el("div","sub", lines.join(" · "));
+    info.style.cssText = "padding:4px 0 12px";
+    bd.appendChild(info);
+    var names = el("div"); names.style.cssText="max-height:190px;overflow:auto;margin-bottom:14px";
+    fresh.slice(0,40).forEach(function(f){
+      var r = el("div","sub", (f.webkitRelativePath||f.name));
+      r.style.cssText = "padding:3px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
+      names.appendChild(r);
+    });
+    if(fresh.length>40) names.appendChild(el("div","sub","… and "+(fresh.length-40)+" more"));
+    bd.appendChild(names);
+    var go = el("button","btn","Import "+fresh.length);
+    go.style.cssText = "width:100%;padding:13px;border-radius:13px;border:0;background:var(--acc);color:var(--acc-ink);font-weight:600;font-size:15px";
+    go.onclick = function(){ P.closeSheet(sh); P.importFiles(fresh); };
+    bd.appendChild(go);
+  }});
+  return Promise.resolve();
+};
+
 function bookSheet(b){
   var sh = P.sheet({ title:b.title||"Book", build:function(bd){
     var head = el("div"); head.style.cssText="display:flex;gap:12px;margin-bottom:8px";
@@ -4484,6 +4565,10 @@ function boot(){
 D.getElementById("filePick").onchange = function(){
   var f = this.files; var self=this;
   P.importFiles(f).then(function(){ self.value=""; });
+};
+D.getElementById("folderPick").onchange = function(){
+  var f = this.files, self = this;
+  P.importFolder(f).then(function(){ self.value=""; });
 };
 D.getElementById("scrim").onclick = function(){ P.closeAllSheets(); };
 W.addEventListener("resize", P.debounce(function(){ if(P.reading) P.relayout(true); }, 160));
